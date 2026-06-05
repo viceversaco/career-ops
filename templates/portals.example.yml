@@ -408,6 +408,26 @@ search_queries:
 
 tracked_companies:
 
+  # -- LinkedIn discovery (optional; local_parser → guest job-search endpoint) --
+  # LinkedIn has no ATS API, so the default scanner can't reach it. The bundled
+  # parser scripts/parsers/linkedin-jobs.mjs queries LinkedIn's PUBLIC guest
+  # job-search endpoint and emits jobs-json-v1; title_filter/location_filter then
+  # trim the results like any other source. Reading each JD is still the pipeline's
+  # job. Disabled by default — uncomment + set your keywords to enable.
+  #   • Reliability: capture a session with `crawl4ai-cookies import linkedin`
+  #     (reused automatically) to avoid throttling.
+  #   • LinkedIn ToS restricts automation and rate-limits aggressively — keep
+  #     --pages small. Clone the block per keyword query.
+  # - name: LinkedIn — Solutions Architect
+  #   careers_url: https://www.linkedin.com/jobs/search/?keywords=Solutions%20Architect
+  #   provider: local-parser
+  #   parser:
+  #     command: node
+  #     script: scripts/parsers/linkedin-jobs.mjs
+  #     args: [--keywords, "Solutions Architect", --location, "United States", --pages, "2"]
+  #     format: jobs-json-v1
+  #   enabled: true
+
   # -- AI Labs & LLM providers --
 
   - name: Anthropic
