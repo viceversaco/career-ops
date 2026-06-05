@@ -19,6 +19,7 @@ All scripts live in the project root as `.mjs` modules and are exposed via `npm 
 | `npm run rollback` | `update-system.mjs rollback` | Rollback last update |
 | `npm run liveness` | `check-liveness.mjs` | Test if job URLs are still active |
 | `npm run scan` | `scan.mjs` | Zero-token portal scanner |
+| `npm run suggest-portals` | `suggest-portals.mjs` | Find untracked companies to promote into `portals.yml` |
 
 ---
 
@@ -216,3 +217,15 @@ npm run scan
 ```
 
 **Exit codes:** `0` scan completed, `1` configuration error or no portals.yml found.
+
+## suggest-portals
+
+Closes the discovery→watchlist loop (zero-token, read-only). Diffs the companies seen across `data/scan-history.tsv`, `data/pipeline.md`, and `data/applications.md` against `tracked_companies`, and reports the **untracked** ones — ranked by frequency. When a company's surfacing URL is a known ATS board (Greenhouse/Ashby/Lever) it pre-fills a ready-to-paste `api:` entry; companies surfaced without an ATS URL (e.g. via the LinkedIn parser) are flagged "needs ATS lookup" for the agent to resolve. Writes nothing — the agent reviews and adds approved entries.
+
+```bash
+npm run suggest-portals              # human-readable report
+node suggest-portals.mjs --json      # machine-readable (for the agent)
+node suggest-portals.mjs --min-count 2   # only companies seen >= N times
+```
+
+The `scan` mode runs this after every scan and offers to promote the fits (see `modes/scan.md`).

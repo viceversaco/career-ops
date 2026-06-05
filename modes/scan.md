@@ -243,6 +243,25 @@ Los niveles son aditivos — se ejecutan en orden, los resultados se mezclan y d
 10. **Ofertas duplicadas**: registrar con status `skipped_dup`
 11. **Ofertas expiradas (Nivel 3)**: registrar con status `skipped_expired`
 
+12. **Candidatos a promoción (mantener viva la watchlist)**: tras persistir las ofertas nuevas, ejecutar:
+
+    ```bash
+    node suggest-portals.mjs           # o --json para consumo del agente
+    ```
+
+    Lista las empresas que aparecen en `scan-history.tsv` / `pipeline.md` / `applications.md`
+    pero que **no** están en `tracked_companies`, ordenadas por frecuencia. El descubrimiento
+    por LinkedIn (local_parser) y WebSearch (Nivel 3) suele revelar empresas desconocidas que
+    encajan — promoverlas a `tracked_companies` las convierte en monitoreo **zero-token
+    permanente** (dejan de re-descubrirse por la vía cara). Esto cierra el bucle
+    descubrimiento → watchlist y mantiene `portals.yml` creciendo con cada scan.
+
+    - **READY TO ADD** (board ATS detectado — Greenhouse/Ashby/Lever): proponer al usuario el
+      bloque YAML sugerido. Verificar el endpoint `api:` (curl/WebFetch) antes de añadir.
+    - **NEEDS ATS LOOKUP** (surgió sin URL de ATS, p.ej. vía LinkedIn): buscar el board nativo
+      de la empresa, verificar el endpoint, y proponer el entry.
+    - **NUNCA** añadir sin aprobación del usuario — solo proponer los fits; el usuario decide.
+
 ## Extracción de título y empresa de WebSearch results
 
 Los resultados de WebSearch vienen en formato: `"Job Title @ Company"` o `"Job Title | Company"` o `"Job Title — Company"`.
