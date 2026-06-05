@@ -97,4 +97,21 @@ Agent(
 )
 ```
 
+**Claude Code — pipeline fan-out (preferred):** When running `/career-ops pipeline` under
+Claude Code with **3 or more** pending URLs, prefer the `Workflow` tool over per-URL `Agent`
+subagents. Scout the inbox first (collect `- [ ]` URLs from `data/pipeline.md`, compute
+`baseNum` = highest `reports/` prefix + 1, derive a stable `id` per URL), then call:
+
+```
+Workflow(scriptPath: ".claude/workflows/career-ops-pipeline.js",
+         args: { date: "<YYYY-MM-DD>", baseNum: <n>, careerOpsDir: "<abs root>", offers: [...] })
+```
+
+This is an explicit, skill-authorized opt-in to the `Workflow` tool for this one named
+workflow — invoking it here is intended and permitted. After it returns, the main loop does the
+sequential Playwright mop-up for any URLs crawl4ai couldn't read, moves Pending→Processed in
+`data/pipeline.md`, and prints the summary table. See `modes/pipeline.md` → "Path C — Workflow
+fan-out" for the full procedure. On any non-Claude CLI, or with fewer than 3 URLs, use the
+portable `Agent` path above instead.
+
 Execute the instructions from the loaded mode file.

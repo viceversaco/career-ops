@@ -91,3 +91,11 @@ cv:
 # half-point scores like 3.5/5 occur in evaluations). Set it to 0 to
 # generate a PDF for every offer.
 # auto_pdf_score_threshold: 4.0
+#
+# Turn auto-PDF OFF entirely (report-only mode): set the threshold above the
+# 5-point scale so no score ever reaches it. This disables auto-generation
+# WITHOUT deleting anything — `generate-pdf.mjs` and on-demand
+# `/career-ops pdf {company-slug}` keep working. Note: the Claude Code Workflow
+# pipeline path (`/career-ops pipeline`, 3+ URLs) omits PDF structurally and
+# ignores this value entirely.
+# auto_pdf_score_threshold: 99   # OFF — report-only
