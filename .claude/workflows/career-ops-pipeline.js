@@ -61,12 +61,20 @@ const workerPrompt = (offer, reportNum) => {
       ].join('\n')
     : [
         'No JD provided. Extract it yourself, parallel-safe, in THIS order ONLY:',
-        '  1. Bash: crawl4ai "' + offer.url + '"   (headless-browser-backed, per-process, returns clean markdown)',
-        '  2. If crawl4ai returns empty / an error / obvious non-JD content:',
-        '     STOP. Return JSON with status:"failed", error:"extraction-failed: ' + offer.url + '",',
-        '     report:null, score:null, final_decision:null. Write NO report and NO TSV.',
+        '  1. Bash: crawl4ai "' + offer.url + '"   (headless-browser-backed, per-process. It auto-applies',
+        '     the matching site profile — cookies, schema.org/JobPosting JSON-LD recovery, and URL',
+        '     rewrites — so LinkedIn, Ashby SPAs, and Greenhouse embeds usually extract cleanly here.)',
+        '  2. Inspect the output and branch:',
+        '     - LOGIN WALL: if it contains "returned a login wall" and "crawl4ai-cookies import", the',
+        '       site session cookie is missing/expired. STOP. Return status:"failed" with',
+        '       error:"cookies-expired: <site>", where <site> is the word right after "[crawl4ai]" in that',
+        '       message (e.g. error:"cookies-expired: linkedin"). Write NO report/TSV. Do NOT retry — a',
+        '       browser would hit the same wall; the user must refresh the cookie.',
+        '     - THIN/ERROR: if empty, an error, or obviously not a JD: STOP. Return status:"failed" with',
+        '       error:"extraction-failed: ' + offer.url + '". Write NO report/TSV.',
+        '     - OTHERWISE it is the JD (markdown or recovered JSON-LD) — proceed to STEP B.',
         '  Do NOT use Playwright/browser_* tools (project rule modes/_shared.md: never 2+ parallel Playwright).',
-        '  Do NOT use WebFetch.',
+        '  Do NOT use WebFetch (disabled).',
       ].join('\n')
 
   return [
@@ -144,9 +152,13 @@ const results = await parallel(
 
 const completed = results.filter((r) => r && r.status === 'completed')
 const failed = results.filter((r) => r && r.status === 'failed')
+const cookieFailures = failed.filter((r) => /cookies-expired/i.test(r.error || ''))
 const extractionFailures = failed.filter((r) => /extraction-failed/i.test(r.error || ''))
-const otherFailures = failed.filter((r) => !/extraction-failed/i.test(r.error || ''))
-log('Evaluate done: ' + completed.length + ' completed, ' + extractionFailures.length + ' need extraction mop-up, ' + otherFailures.length + ' other failures.')
+const otherFailures = failed.filter((r) => !/cookies-expired|extraction-failed/i.test(r.error || ''))
+log('Evaluate done: ' + completed.length + ' completed, ' + cookieFailures.length + ' cookie-expired, ' + extractionFailures.length + ' need extraction mop-up, ' + otherFailures.length + ' other failures.')
+
+// Parse the site name out of a "cookies-expired: <site>" error.
+const siteOf = (err) => (String(err || '').match(/cookies-expired:\s*(\S+)/i) || [])[1] || 'unknown'
 
 // ============ PHASE 2: MERGE (single agent — needs Bash) ============
 phase('Merge')
@@ -188,7 +200,7 @@ if (completed.length > 0) {
 return {
   date,
   baseNum,
-  counts: { total: offers.length, completed: completed.length, extractionFailed: extractionFailures.length, otherFailed: otherFailures.length },
+  counts: { total: offers.length, completed: completed.length, cookieExpired: cookieFailures.length, extractionFailed: extractionFailures.length, otherFailed: otherFailures.length },
   merge,
   // Move these Pending -> Processed in data/pipeline.md and print the summary table:
   processed: completed.map((r) => ({
@@ -202,7 +214,10 @@ return {
     report: r.report,
     pdf: false,
   })),
-  // Main loop: sequential Playwright mop-up for these, then re-invoke with offer.jd set:
+  // Cookie expired/missing — do NOT Playwright (same wall). Ask the user to run
+  // `crawl4ai-cookies import <site>`, then re-run pipeline for these.
+  cookieFailures: cookieFailures.map((r) => ({ id: r.id, url: urlById[r.id], company: r.company, role: r.role, site: siteOf(r.error) })),
+  // Main loop: sequential Playwright last-resort for these, then manual paste:
   extractionFailures: extractionFailures.map((r) => ({ id: r.id, url: urlById[r.id], company: r.company, role: r.role })),
   // Surface, but do not retry automatically:
   otherFailures: otherFailures.map((r) => ({ id: r.id, url: urlById[r.id], company: r.company, role: r.role, reportNum: r.report_num, error: r.error })),

@@ -58,11 +58,19 @@ workflow script never touches `data/pipeline.md` — the main loop owns it.
    writes `reports/{baseNum+i}-{slug}-{date}.md` + `batch/tracker-additions/{id}.tsv`
    (**no PDF**). A final agent runs `merge-tracker.mjs` + `verify-pipeline.mjs`. The workflow
    returns `{ processed[], extractionFailures[], otherFailures[], merge }`.
-3. **Playwright mop-up (main loop, sequential):** for each `extractionFailures` URL (crawl4ai
-   couldn't read it), render it with Playwright **one at a time** (never in parallel — see
-   `modes/_shared.md`). Re-invoke the workflow for the recovered ones with `offers[].jd` set
-   (continue the report-number sequence). URLs Playwright also can't read (e.g. login-gated
-   LinkedIn) → mark `- [!] URL — Error: login required, paste JD` and ask the user to paste.
+3. **Handle failures (main loop):** the workflow returns three buckets — handle each differently:
+   a. **`cookieFailures`** (crawl4ai hit a login wall — a site session cookie is missing/expired):
+      do NOT Playwright these (a browser hits the same wall). Tell the user to run
+      `crawl4ai-cookies import <site>` (the `site` is on each entry, e.g. `linkedin`), then re-run
+      `/career-ops pipeline`. Leave them in Pending as
+      `- [!] URL — Error: cookies-expired (<site>); run crawl4ai-cookies import <site> + re-run`.
+   b. **`extractionFailures`** (crawl4ai returned thin/no JD, and it is NOT a cookie wall): with
+      crawl4ai's site profiles (cookies + JSON-LD recovery + URL rewrites) this is now rare. As a
+      **last resort**, render each with Playwright **one at a time** (never in parallel — see
+      `modes/_shared.md`), then re-invoke the workflow for the recovered ones with `offers[].jd`
+      set (continue the report-number sequence). Whatever Playwright also can't read →
+      `- [!] URL — Error: needs manual paste` and ask the user to paste the JD.
+   c. **`otherFailures`**: surface the error to the user; leave the URL in Pending.
 4. **Post-process (main loop):**
    a. Move each `processed` URL from Pending to Processed:
       `- [x] #NNN | URL | Company | Role | Score/5 | PDF ❌`
