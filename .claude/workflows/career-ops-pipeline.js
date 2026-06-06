@@ -40,7 +40,10 @@ const EVAL_SCHEMA = {
   required: ['status', 'id', 'report_num', 'company', 'role', 'score', 'legitimacy', 'pdf', 'report', 'final_decision', 'error'],
 }
 
-const { date, baseNum, careerOpsDir, offers } = args
+// The Workflow runtime delivers `args` as a JSON string in some harnesses and as
+// a plain object in others — normalize so this script works under both.
+const _input = typeof args === 'string' ? JSON.parse(args) : (args || {})
+const { date, baseNum, careerOpsDir, offers } = _input
 
 const pad3 = (n) => String(n).padStart(3, '0')
 
