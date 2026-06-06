@@ -135,6 +135,11 @@ const results = await parallel(
       schema: EVAL_SCHEMA,
       label: 'eval:' + offer.id,
       phase: 'Evaluate',
+      // Model + reasoning effort are pinned on the career-ops-evaluator subagent
+      // definition (.claude/agents/career-ops-evaluator.md): model opus, effort
+      // high. The Workflow agent() API has no inline effort option (CC #43083),
+      // so per-stage effort must be routed through a named subagent.
+      agentType: 'career-ops-evaluator',
     })
       .then((r) => r || null)
       .catch((e) => ({
@@ -193,7 +198,8 @@ if (completed.length > 0) {
     'Do NOT edit applications.md by hand. Do NOT re-run any worker.',
   ].join('\n')
 
-  merge = await agent(mergePrompt, { schema: MERGE_SCHEMA, label: 'merge+verify', phase: 'Merge' })
+  // Model + effort pinned on .claude/agents/career-ops-merger.md: model sonnet, effort medium.
+  merge = await agent(mergePrompt, { schema: MERGE_SCHEMA, label: 'merge+verify', phase: 'Merge', agentType: 'career-ops-merger' })
     .catch((e) => ({ merged: false, verifyClean: false, verifyErrors: ['merge agent crashed: ' + (e && e.message)], mergeSummary: '' }))
 } else {
   log('No completed evaluations — skipping merge.')
