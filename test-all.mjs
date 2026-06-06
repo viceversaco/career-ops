@@ -1086,6 +1086,39 @@ try {
   fail(`tracker-link normalization tests crashed: ${e.message}`);
 }
 
+// ── 13. ROLE FUZZY MATCHING (dedup safety) ──────────────────────
+
+console.log('\n13. Role fuzzy matching');
+
+try {
+  const { roleFuzzyMatch } = await import(pathToFileURL(join(ROOT, 'role-match.mjs')).href);
+  const check = (a, b, expected, label) => {
+    if (roleFuzzyMatch(a, b) === expected) pass(label);
+    else fail(`${label} — expected ${expected}, got ${!expected}`);
+  };
+
+  // Same family, distinct verticals must NOT collapse (the Anthropic case that
+  // silently overwrote a real row in a live run — both sides carry a unique token).
+  check('Applied AI Architect, Industries', 'Applied AI Architect, Enterprise Tech', false,
+    'distinct verticals stay separate (Industries vs Enterprise Tech)');
+  check('Applied AI Engineer, Commercial', 'Applied AI Engineer, Startups', false,
+    'distinct verticals stay separate (Commercial vs Startups)');
+  check('Forward Deployed Engineer, DevOps', 'Forward Deployed Engineer, VoIP', false,
+    'distinct specializations stay separate (DevOps vs VoIP)');
+
+  // Intended dedup must still work (asymmetric / seniority-only differences).
+  check('Senior Solutions Architect', 'Solutions Architect', true,
+    'seniority-only difference still dedupes');
+  check('Solutions Architect', 'Solutions Architect, Enterprise', true,
+    'asymmetric qualifier still dedupes');
+
+  // Issue #633 preserved: baseline-only overlap never matches.
+  check('Staff SWE, API', 'Staff SWE, Kubernetes Platform', false,
+    'baseline-only overlap stays separate (#633)');
+} catch (e) {
+  fail(`role fuzzy matching tests crashed: ${e.message}`);
+}
+
 // ── SUMMARY ─────────────────────────────────────────────────────
 
 console.log('\n' + '='.repeat(50));
