@@ -67,9 +67,10 @@ console.log('\n2. Script execution (graceful on empty data)');
 const scripts = [
   { name: 'cv-sync-check.mjs', expectExit: 1, allowFail: true }, // fails without cv.md (normal in repo)
   { name: 'verify-pipeline.mjs', expectExit: 0 },
-  { name: 'normalize-statuses.mjs', expectExit: 0 },
   // --dry-run: these rewrite the tracker. Without it the smoke test silently
-  // mutates the user's live data/applications.md on every run.
+  // mutates the user's live data/applications.md on every run (normalize-statuses
+  // rewrites status/score fields; dedup/merge add or remove rows).
+  { name: 'normalize-statuses.mjs --dry-run', expectExit: 0 },
   { name: 'dedup-tracker.mjs --dry-run', expectExit: 0 },
   { name: 'merge-tracker.mjs --dry-run', expectExit: 0 },
   { name: 'analyze-patterns.mjs --self-test', expectExit: 0 },
