@@ -1122,6 +1122,64 @@ try {
   fail(`role fuzzy matching tests crashed: ${e.message}`);
 }
 
+// ── 14. TRACKER DEDUP / RE-SCORE ────────────────────────────────
+
+console.log('\n14. Tracker dedup + re-score logic');
+
+try {
+  const { findDuplicate, isStaleReeval } = await import(pathToFileURL(join(ROOT, 'tracker-dedup.mjs')).href);
+
+  const app = (num, company, role, score, date, report) => ({
+    num, company, role, score, date, report, status: 'Evaluated', pdf: '❌',
+    raw: `| ${num} | ${date} | ${company} | ${role} | ${score} | Evaluated | ❌ | ${report} | n |`,
+  });
+
+  // Mirrors the live state that exposed the bugs: a Data-Eng Databricks role at
+  // entry #148 and the AI/ML one at #165 (distinct verticals, same baseline).
+  const existing = [
+    app(8,   'Parloa',     'Senior Forward Deployed Engineer - Partner Success - US', '4.5/5', '2026-06-05', '[022](../reports/022-parloa-2026-06-05.md)'),
+    app(148, 'Databricks', 'Specialist Solutions Architect - Data Engineering & Observability', '2.3/5', '2026-06-06', '[130](../reports/130-databricks-2026-06-06.md)'),
+    app(165, 'Databricks', 'Specialist Solutions Architect - AI/ML', '4.3/5', '2026-06-06', '[129](../reports/129-databricks-2026-06-06.md)'),
+  ];
+
+  // (a) A re-score that LOWERS a score still matches and updates (was silently
+  //     dropped by the old "higher score wins" rule).
+  const parloaRescore = app(147, 'Parloa', 'Senior Forward Deployed Engineer - Partner Success - US', '4.1/5', '2026-06-06', '[147](reports/147-parloa-2026-06-06.md)');
+  const dParloa = findDuplicate(parloaRescore, existing);
+  if (dParloa && dParloa.num === 8) pass('re-score matches the existing role by company+role');
+  else fail(`re-score should match #8, got ${dParloa && dParloa.num}`);
+  if (dParloa && !isStaleReeval(parloaRescore, dParloa)) pass('newer-dated re-score is applied even though it lowers the score');
+  else fail('newer-dated re-score must not be treated as stale');
+
+  // (b) Entry-num collision across DIFFERENT roles must not overwrite the wrong
+  //     row: addition num 148 collides with the Data-Eng entry #148, but the
+  //     addition is the AI/ML role → it must resolve to #165, never #148.
+  const dbxRescore = app(148, 'Databricks', 'Specialist Solutions Architect - AI/ML', '3.7/5', '2026-06-06', '[148](reports/148-databricks-2026-06-06.md)');
+  const dDbx = findDuplicate(dbxRescore, existing);
+  if (dDbx && dDbx.num === 165) pass('num collision across roles resolves by company+role (AI/ML → #165, not Data-Eng #148)');
+  else fail(`num-148 AI/ML re-score should match #165, got ${dDbx && dDbx.num}`);
+  if (dDbx && !isStaleReeval(dbxRescore, dDbx)) pass('same-date AI/ML downgrade (4.3→3.7) is applied, not skipped');
+  else fail('same-date re-score must not be treated as stale');
+
+  // (c) A STALE addition (older date) is skipped so it cannot clobber a newer row.
+  const staleAdd = app(8, 'Parloa', 'Senior Forward Deployed Engineer - Partner Success - US', '3.6/5', '2026-06-04', '[018](reports/018-parloa.md)');
+  if (isStaleReeval(staleAdd, existing[0])) pass('stale addition (older date) is skipped');
+  else fail('older-dated addition should be stale (skipped)');
+
+  // (d) Distinct verticals never cross-match (Data-Eng re-add must hit #148, not #165).
+  const dataEngReadd = app(200, 'Databricks', 'Specialist Solutions Architect - Data Engineering & Observability', '2.4/5', '2026-06-07', '[201](reports/201-databricks.md)');
+  const dDataEng = findDuplicate(dataEngReadd, existing);
+  if (dDataEng && dDataEng.num === 148) pass('Data-Eng re-add matches the Data-Eng row (#148), not AI/ML (#165)');
+  else fail(`Data-Eng re-add should match #148, got ${dDataEng && dDataEng.num}`);
+
+  // (e) A genuinely new role at an existing company is NOT a duplicate.
+  const brandNew = app(201, 'Parloa', 'Staff Platform Engineer', '3.0/5', '2026-06-07', '[202](reports/202-parloa.md)');
+  if (findDuplicate(brandNew, existing) === null) pass('a genuinely new role returns no duplicate (becomes a new entry)');
+  else fail('a new distinct role must not match an existing entry');
+} catch (e) {
+  fail(`tracker dedup tests crashed: ${e.message}`);
+}
+
 // ── SUMMARY ─────────────────────────────────────────────────────
 
 console.log('\n' + '='.repeat(50));

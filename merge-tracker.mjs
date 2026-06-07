@@ -7,8 +7,10 @@
  * - 8-col: num\tdate\tcompany\trole\tstatus\tscore\tpdf\treport (no notes)
  * - Pipe-delimited (markdown table row): | col | col | ... |
  *
- * Dedup: company normalized + role fuzzy match + report number match
- * If duplicate with higher score → update in-place, update report link
+ * Dedup: report number match, then company normalized + role fuzzy match.
+ * A re-evaluation updates the matched row regardless of score direction; only a
+ * STALE addition (older date than the existing row) is skipped. The dedup/update
+ * decisions live in tracker-dedup.mjs (unit-tested in test-all.mjs section 14).
  * Validates status against states.yml (rejects non-canonical, logs warning)
  *
  * Run: node career-ops/merge-tracker.mjs [--dry-run] [--verify]
@@ -19,7 +21,7 @@ import { join, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
-import { roleFuzzyMatch } from './role-match.mjs';
+import { findDuplicate, isStaleReeval } from './tracker-dedup.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original).
@@ -81,18 +83,10 @@ function validateStatus(status) {
   return 'Evaluated';
 }
 
-function normalizeCompany(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-// Role fuzzy-matching (token sets, roleTokens, roleFuzzyMatch) lives in
-// ./role-match.mjs so it can be unit-tested in isolation (this file runs its
-// merge at import time). roleFuzzyMatch is imported at the top.
-
-function extractReportNum(reportStr) {
-  const m = reportStr.match(/\[(\d+)\]/);
-  return m ? parseInt(m[1]) : null;
-}
+// normalizeCompany, extractReportNum, findDuplicate (report-num then
+// company+role match — never entry-number alone) and isStaleReeval live in
+// ./tracker-dedup.mjs so the dedup/update logic can be unit-tested without
+// running this file's merge (which executes at import time). Imported above.
 
 function parseScore(s) {
   const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
@@ -273,39 +267,20 @@ for (const file of tsvFiles) {
   // so it resolves correctly when clicked from applications.md (see #760).
   addition.report = normalizeReportLink(addition.report);
 
-  // Check for duplicate by:
-  // 1. Exact report number match
-  // 2. Company + role fuzzy match
-  const reportNum = extractReportNum(addition.report);
-  let duplicate = null;
-
-  if (reportNum) {
-    // Check if this report number already exists
-    duplicate = existingApps.find(app => {
-      const existingReportNum = extractReportNum(app.report);
-      return existingReportNum === reportNum;
-    });
-  }
-
-  if (!duplicate) {
-    // Exact entry number match
-    duplicate = existingApps.find(app => app.num === addition.num);
-  }
-
-  if (!duplicate) {
-    // Company + role fuzzy match
-    const normCompany = normalizeCompany(addition.company);
-    duplicate = existingApps.find(app => {
-      if (normalizeCompany(app.company) !== normCompany) return false;
-      return roleFuzzyMatch(addition.role, app.role);
-    });
-  }
+  // Find the entry this addition updates: same report number, else same
+  // company + fuzzy-matching role. NOT entry-number alone — see tracker-dedup.mjs.
+  const duplicate = findDuplicate(addition, existingApps);
 
   if (duplicate) {
     const newScore = parseScore(addition.score);
     const oldScore = parseScore(duplicate.score);
 
-    if (newScore > oldScore) {
+    // The newest evaluation wins — a re-score updates the row in any direction.
+    // Only a stale addition (older date than the existing row) is skipped.
+    if (isStaleReeval(addition, duplicate)) {
+      console.log(`⏭️  Skip (stale): ${addition.company} — ${addition.role} (addition ${addition.date} older than existing #${duplicate.num} ${duplicate.date})`);
+      skipped++;
+    } else {
       console.log(`🔄 Update: #${duplicate.num} ${addition.company} — ${addition.role} (${oldScore}→${newScore})`);
       const lineIdx = appLines.indexOf(duplicate.raw);
       if (lineIdx >= 0) {
@@ -313,9 +288,6 @@ for (const file of tsvFiles) {
         appLines[lineIdx] = updatedLine;
         updated++;
       }
-    } else {
-      console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (existing #${duplicate.num} ${oldScore} >= new ${newScore})`);
-      skipped++;
     }
   } else {
     // New entry — use the number from the TSV
