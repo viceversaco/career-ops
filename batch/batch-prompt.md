@@ -62,6 +62,7 @@ Aplicación durante la evaluación A-G:
 1. Lee el archivo JD en `{{JD_FILE}}`
 2. Si el archivo está vacío o no existe, intenta obtener el JD desde `{{URL}}` con WebFetch
 3. Si ambos fallan, reporta error y termina
+4. **Archiva el JD crudo** que obtuviste: escríbelo en `jds/archive/{{REPORT_NUM}}-{company-slug}-{{DATE}}.md` (`mkdir -p jds/archive` primero). Encabézalo con `**URL:** {{URL}}` y `**Captured:** {{DATE}}`, seguido del texto del JD verbatim. Esto permite re-evaluar después sin volver a hacer fetch.
 
 ### Paso 2 — Evaluación A-G
 
@@ -228,6 +229,7 @@ Donde `{company-slug}` es el nombre de empresa en lowercase, sin espacios, con g
 **Score:** {X/5}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}
 **URL:** {URL de la oferta original}
+**JD:** local:jds/archive/{{REPORT_NUM}}-{company-slug}-{{DATE}}.md
 **PDF:** {output/cv-candidate-{company-slug}-{{DATE}}.pdf if score ≥ the resolved `auto_pdf_score_threshold` from Paso 4, else `not generated — run /career-ops pdf {company-slug} to create on demand`}
 **Batch ID:** {{ID}}
 

@@ -150,6 +150,8 @@ Analyze the job posting for signals that indicate whether this is a real, active
 
 Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
+**Also archive the raw JD** you evaluated to `jds/archive/{###}-{company-slug}-{YYYY-MM-DD}.md` (create `jds/archive/` first; header it with `**URL:**` + `**Captured:** {YYYY-MM-DD}`, then the JD text verbatim). This lets a future re-score read the JD without re-fetching the posting.
+
 - `{###}` = next sequential number (3 digits, zero-padded)
 - `{company-slug}` = company name in lowercase, without spaces (use hyphens)
 - `{YYYY-MM-DD}` = current date
@@ -161,6 +163,7 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 **Date:** {YYYY-MM-DD}
 **URL:**
+**JD:** local:jds/archive/{###}-{company-slug}-{YYYY-MM-DD}.md
 **Archetype:** {detected}
 **Score:** {X/5}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}

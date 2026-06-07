@@ -114,6 +114,7 @@ After detecting archetype, read `modes/_profile.md` for the user's specific fram
 8b. Case study URLs in PDF Professional Summary (recruiter may only read this).
 9. **Tracker additions as TSV** -- NEVER edit applications.md directly. Write TSV in `batch/tracker-additions/`.
 10. **Include `**URL:**` in every report header.**
+11. **Archive the JD:** save the raw posting to `jds/archive/{num}-{company-slug}-{date}.md` (mkdir -p first) and add a `**JD:**` line to the report header — so a re-score never needs a re-fetch.
 
 ### Tools
 
