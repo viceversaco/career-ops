@@ -32,7 +32,10 @@ const APPS_FILE = process.env.CAREER_OPS_TRACKER
     ? join(CAREER_OPS, 'data/applications.md')
     : join(CAREER_OPS, 'applications.md');
 const TRACKER_DIR = dirname(APPS_FILE);
-const ADDITIONS_DIR = join(CAREER_OPS, 'batch/tracker-additions');
+// CAREER_OPS_ADDITIONS overrides the additions dir (used by tests, mirrors CAREER_OPS_TRACKER).
+const ADDITIONS_DIR = process.env.CAREER_OPS_ADDITIONS
+  ? process.env.CAREER_OPS_ADDITIONS
+  : join(CAREER_OPS, 'batch/tracker-additions');
 const MERGED_DIR = join(ADDITIONS_DIR, 'merged');
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERIFY = process.argv.includes('--verify');
@@ -87,6 +90,9 @@ function validateStatus(status) {
 // company+role match — never entry-number alone) and isStaleReeval live in
 // ./tracker-dedup.mjs so the dedup/update logic can be unit-tested without
 // running this file's merge (which executes at import time). Imported above.
+// roleFuzzyMatch lives in ./role-match.mjs and carries upstream #793's
+// token-union ratio plus this fork's both-sides-unique-token rule.
+
 
 function parseScore(s) {
   const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
@@ -268,7 +274,9 @@ for (const file of tsvFiles) {
   addition.report = normalizeReportLink(addition.report);
 
   // Find the entry this addition updates: same report number, else same
-  // company + fuzzy-matching role. NOT entry-number alone — see tracker-dedup.mjs.
+  // company + fuzzy-matching role. NOT entry-number alone — upstream #867's
+  // num+company tier still cross-matches sibling roles at one company when
+  // numbers collide (the #148 incident); see tracker-dedup.mjs.
   const duplicate = findDuplicate(addition, existingApps);
 
   if (duplicate) {

@@ -26,6 +26,25 @@ var (
 	reBatchID        = regexp.MustCompile(`(?m)^\*\*Batch ID:\*\*\s*(\d+)`)
 )
 
+// resolveReportPath converts a report link from the tracker into a path
+// relative to careerOpsPath. Links are normally relative to the tracker
+// file's own directory (see merge-tracker.mjs link normalization, #760);
+// legacy trackers may still carry root-relative links, so fall back to the
+// raw link when the tracker-relative resolution does not exist on disk.
+func resolveReportPath(careerOpsPath, trackerPath, link string) string {
+	resolved := filepath.Join(filepath.Dir(trackerPath), link)
+	if _, err := os.Stat(resolved); err != nil {
+		legacy := filepath.Join(careerOpsPath, link)
+		if _, err2 := os.Stat(legacy); err2 == nil {
+			resolved = legacy
+		}
+	}
+	if rel, err := filepath.Rel(careerOpsPath, resolved); err == nil {
+		return rel
+	}
+	return link
+}
+
 // ParseApplications reads applications.md and returns parsed applications.
 // It tries both {path}/applications.md and {path}/data/applications.md for compatibility.
 func ParseApplications(careerOpsPath string) []model.CareerApplication {
@@ -39,12 +58,6 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 			return nil
 		}
 	}
-
-	// Report links in the tracker are written relative to the tracker file's
-	// own directory (e.g. "../reports/..." when the tracker lives in data/),
-	// not relative to careerOpsPath. Capture the tracker dir so links can be
-	// normalized to root-relative paths below.
-	trackerDir := filepath.Dir(filePath)
 
 	lines := strings.Split(string(content), "\n")
 	apps := make([]model.CareerApplication, 0)
@@ -102,18 +115,24 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 			app.Score, _ = strconv.ParseFloat(sm[1], 64)
 		}
 
-		// Parse report link. Links are relative to the tracker file's dir;
-		// normalize to a path relative to careerOpsPath so all downstream
-		// consumers can join it against careerOpsPath directly.
+		// Parse report link. Tracker links are written relative to the
+		// tracker file itself (e.g. ../reports/... when the tracker lives in
+		// data/), so resolve against the tracker's directory and normalize
+		// back to a careerOpsPath-relative path, which is what every
+		// consumer joins against. Legacy root-relative links are kept as a
+		// fallback when the resolved file does not exist.
 		if rm := reReportLink.FindStringSubmatch(fields[7]); rm != nil {
 			app.ReportNumber = rm[1]
-			app.ReportPath = normalizeReportPath(careerOpsPath, trackerDir, rm[2])
+			app.ReportPath = resolveReportPath(careerOpsPath, filePath, rm[2])
 		}
 
 		// Notes (field 8 if exists)
 		if len(fields) > 8 {
 			app.Notes = fields[8]
 		}
+
+		// Lift location / work mode / pay / last-contact out of the notes free-text
+		deriveNoteFields(&app)
 
 		apps = append(apps, app)
 	}
@@ -509,18 +528,6 @@ func NormalizeStatus(raw string) string {
 	default:
 		return s
 	}
-}
-
-// normalizeReportPath converts a report link (written relative to trackerDir,
-// the directory containing applications.md) into a path relative to
-// careerOpsPath, so every consumer can join it against careerOpsPath. Falls
-// back to the cleaned resolved path if a relative path can't be computed.
-func normalizeReportPath(careerOpsPath, trackerDir, reportPath string) string {
-	resolved := filepath.Clean(filepath.Join(trackerDir, reportPath))
-	if rel, err := filepath.Rel(filepath.Clean(careerOpsPath), resolved); err == nil {
-		return rel
-	}
-	return resolved
 }
 
 // LoadReportSummary extracts key fields from a report file.

@@ -86,10 +86,15 @@ export function roleFuzzyMatch(a, b) {
   const uniqueB = wordsB.filter(w => !setA.has(w));
   if (uniqueA.length > 0 && uniqueB.length > 0) return false;
 
-  // Jaccard-style ratio on content tokens. Two roles are "the same" only
-  // when the overlap dominates the smaller side — not when they just share
-  // a location + "engineer".
-  const minLen = Math.min(wordsA.length, wordsB.length);
-  const ratio = overlap.length / minLen;
+  // True Jaccard ratio on content tokens (overlap / union), per upstream #793.
+  // Dividing by the smaller side conflated distinct roles that share a long
+  // prefix — e.g. "Full-Stack Engineer 5, AI Insights & Visualizations" vs
+  // "Full Stack Engineer 5, Ads Reporting" (overlap full/stack/engineer = 3,
+  // min side 4 → 0.75 "match"). Union punishes the non-shared specialty
+  // tokens, while genuine reposts (identical token sets) still score 1.0.
+  // Mostly redundant with the unique-token rule above, but kept in upstream's
+  // form so future upstream changes to this logic merge cleanly.
+  const union = new Set([...wordsA, ...wordsB]).size;
+  const ratio = overlap.length / union;
   return ratio >= 0.6;
 }
