@@ -30,17 +30,20 @@ On the first message of each session, run the update checker silently:
 node update-system.mjs check
 ```
 
-Parse the JSON output:
-- `{"status": "update-available", "local": "1.0.0", "remote": "1.1.0", "changelog": "..."}` → tell the user:
-  > "career-ops update available (v{local} → v{remote}). Your data (CV, profile, tracker, reports) will NOT be touched. Want me to update?"
-  If yes → run `node update-system.mjs apply`. If no → run `node update-system.mjs dismiss`.
+**FORK NOTICE — this install updates via git merge, NEVER `update-system.mjs apply`.** This repo is Robbie's fork (`viceversaco/career-ops`, remote `upstream` = santifer/career-ops) carrying local commits to system-layer files (dedup modules, pipeline workflow, scanner parsers, tests). `apply` overwrites system-layer files with upstream copies — its data-safety promise only covers user-layer files — so it would silently clobber the fork's enhancements. The same goes for `rollback`. The update path is:
+
+1. `git fetch upstream --tags`
+2. `git merge upstream/main` — resolve conflicts by keeping the fork's enhancements while converging on upstream wherever compatible (commit `3c53845`, the v1.9.0 merge, is a worked example)
+3. Verify before pushing: `node test-all.mjs` + `cd dashboard && go build ./...` + `node verify-pipeline.mjs`
+
+Parse the JSON output of the check:
+- `{"status": "update-available", "local": "1.0.0", "remote": "1.1.0", "changelog": "..."}` → tell the user a new upstream release exists and offer the **git merge path above** (never `apply`). If declined → run `node update-system.mjs dismiss`.
 - `{"status": "up-to-date"}` → say nothing
 - `{"status": "dismissed"}` → say nothing
 - `{"status": "offline"}` → say nothing
 - `{"status": "no-remote-version"}` → say nothing (checker reached GitHub but neither VERSION nor the latest release tag parsed as semver — treat as a silent non-failure, same as offline)
 
-The user can also say "check for updates" or "update career-ops" at any time to force a check.
-To rollback: `node update-system.mjs rollback`
+The user can also say "check for updates" or "update career-ops" at any time to force a check — same rule: git merge, never `apply`.
 
 ## What is career-ops
 
