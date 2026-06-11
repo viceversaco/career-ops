@@ -610,7 +610,6 @@ try {
   else fail('whitespace-only location should pass');
 
   // Case 14: non-string location (number/object/null) → pass without throwing
-  let crashed = false;
   try {
     const r1 = filter(42);
     const r2 = filter({ city: 'Brussels' });
@@ -622,7 +621,6 @@ try {
       fail(`non-string location results: number=${r1}, object=${r2}, null=${r3}, undefined=${r4}`);
     }
   } catch (e) {
-    crashed = true;
     fail(`non-string location crashed: ${e.message}`);
   }
 
@@ -1401,6 +1399,240 @@ try {
   rmSync(ready, { recursive: true, force: true });
 } catch (e) {
   fail(`Cold-start trigger test crashed: ${e.message}`);
+}
+
+// ── 15. SCAN-TIME TRIAGE (triage-core.mjs, fork enhancement) ────
+
+console.log('\n15. Scan-time triage (ranking + first-pass dedupe)');
+
+try {
+  const tc = await import(pathToFileURL(join(ROOT, 'triage-core.mjs')).href);
+
+  const sampleConfig = {
+    title_filter: { seniority_boost: ['Senior', 'Staff'] },
+    triage: {
+      title_boosts: [
+        { pattern: 'Forward Deployed', weight: 30 },
+        { pattern: 'AI Solutions Architect', weight: 30 },
+        { pattern: 'Solutions Architect', weight: 20 },
+        { pattern: 'AI Engineer', weight: 8 },
+        { pattern: 'Pre-Sales', weight: -10 },
+      ],
+      company_boosts: { BadAgency: -25 },
+      discard_titles: ['Product Manager', 'Engineering Manager'],
+      url_source_penalty: 5,
+      tiers: { p1: 50, p2: 30, p3: 10 },
+    },
+  };
+  const rules = tc.loadTriageConfig(sampleConfig);
+
+  // (a) Feature off: no triage block → null rules → rank/discard are no-ops
+  if (tc.loadTriageConfig({}) === null && tc.loadTriageConfig(undefined) === null && tc.loadTriageConfig({ title_filter: {} }) === null) {
+    pass('no triage: block → loadTriageConfig returns null (feature off)');
+  } else {
+    fail('loadTriageConfig must return null when the triage block is absent');
+  }
+  if (tc.rankOffer({ title: 'Forward Deployed Engineer' }, null) === null &&
+      tc.shouldDiscard({ title: 'Product Manager' }, null) === null) {
+    pass('null rules → rankOffer/shouldDiscard are no-ops (upstream-compatible passthrough)');
+  } else {
+    fail('rankOffer/shouldDiscard must be no-ops when rules are null');
+  }
+
+  // (b) rankOffer tier assignment
+  const p1 = tc.rankOffer({ title: 'Senior AI Solutions Architect', company: 'Acme', url: 'https://jobs.ashbyhq.com/acme/1' }, rules);
+  if (p1.tier === 'P1' && p1.score === 55) pass('stacked boosts + seniority → P1 (AI SA 30 + SA 20 + senior 5 = 55)');
+  else fail(`expected P1/55, got ${JSON.stringify(p1)}`);
+
+  const p2 = tc.rankOffer({ title: 'Forward Deployed Engineer', company: 'Acme', url: 'https://jobs.ashbyhq.com/acme/2' }, rules);
+  if (p2.tier === 'P2' && p2.score === 30) pass('single 30-weight boost → P2 at the threshold');
+  else fail(`expected P2/30, got ${JSON.stringify(p2)}`);
+
+  const low = tc.rankOffer({ title: 'Backend Engineer', company: 'Acme', url: 'https://jobs.lever.co/acme/3' }, rules);
+  if (low.tier === 'LOW' && low.score === 0) pass('no boost matches → LOW');
+  else fail(`expected LOW/0, got ${JSON.stringify(low)}`);
+
+  const agency = tc.rankOffer({ title: 'Solutions Architect', company: 'BadAgency', url: 'https://jobs.ashbyhq.com/badagency/1' }, rules);
+  if (agency.score === -5 && agency.tier === 'LOW') pass('negative company boost demotes agency listings (20 - 25 = -5 → LOW)');
+  else fail(`expected -5/LOW for agency, got ${JSON.stringify(agency)}`);
+
+  const linked = tc.rankOffer({ title: 'AI Solutions Architect', company: 'Acme', url: 'https://www.linkedin.com/jobs/view/123' }, rules);
+  const native = tc.rankOffer({ title: 'AI Solutions Architect', company: 'Acme', url: 'https://jobs.ashbyhq.com/acme/9' }, rules);
+  if (native.score - linked.score === 5) pass('aggregator URL penalty applies (LinkedIn 5 below native ATS)');
+  else fail(`url penalty wrong: native=${native.score}, linkedin=${linked.score}`);
+
+  // "AI Architect" must not fire inside "GenAI Architect" (word-boundary matching)
+  const wbRules = tc.loadTriageConfig({ triage: { title_boosts: [{ pattern: 'AI Architect', weight: 25 }] } });
+  if (tc.rankOffer({ title: 'GenAI Architect', url: 'https://x.example/1' }, wbRules).score === 0 &&
+      tc.rankOffer({ title: 'Senior AI Architect', url: 'https://x.example/2' }, wbRules).score === 25) {
+    pass('title boosts use word boundaries (no match inside "GenAI Architect")');
+  } else {
+    fail('word-boundary matching broken for title boosts');
+  }
+
+  // (c) shouldDiscard
+  if (tc.shouldDiscard({ title: 'Senior Product Manager, Agentic' }, rules) === 'Product Manager') {
+    pass('shouldDiscard returns the matched discard pattern');
+  } else {
+    fail('shouldDiscard should match "Product Manager" inside a longer title');
+  }
+  if (tc.shouldDiscard({ title: 'Forward Deployed Engineer' }, rules) === null) {
+    pass('shouldDiscard misses non-discard titles');
+  } else {
+    fail('shouldDiscard false-positive on a keeper title');
+  }
+  if (tc.shouldDiscard({ title: 'Engineering Managers Guild Liaison' }, rules) === null) {
+    pass('shouldDiscard respects word boundaries ("Engineering Managers" is not "Engineering Manager")');
+  } else {
+    fail('shouldDiscard must not match "Engineering Manager" inside "Engineering Managers"');
+  }
+
+  // (d) within-batch near-dup collapse — native ATS wins over LinkedIn even when seen later
+  const batch = [
+    { url: 'https://www.linkedin.com/jobs/view/999', company: 'Acme', title: 'Senior Forward Deployed Engineer' },
+    { url: 'https://jobs.ashbyhq.com/acme/123', company: 'Acme', title: 'Forward Deployed Engineer' },
+    { url: 'https://jobs.lever.co/other/1', company: 'Other', title: 'Forward Deployed Engineer' },
+  ];
+  const { kept, dropped } = tc.findNearDups(batch);
+  if (kept.length === 2 && dropped.length === 1 &&
+      kept.some(o => o.url === 'https://jobs.ashbyhq.com/acme/123') &&
+      dropped[0].url === 'https://www.linkedin.com/jobs/view/999' &&
+      dropped[0].dupOf === 'https://jobs.ashbyhq.com/acme/123') {
+    pass('near-dup collapse keeps the native ATS URL over the LinkedIn repost');
+  } else {
+    fail(`near-dup collapse wrong: kept=${kept.map(o => o.url)}, dropped=${dropped.map(o => o.url)}`);
+  }
+  if (kept.some(o => o.company === 'Other')) {
+    pass('same role at a DIFFERENT company is never collapsed');
+  } else {
+    fail('near-dup collapse merged across companies');
+  }
+  const tie = tc.findNearDups([
+    { url: 'https://jobs.ashbyhq.com/acme/first', company: 'Acme', title: 'Solutions Architect' },
+    { url: 'https://job-boards.greenhouse.io/acme/jobs/2', company: 'Acme', title: 'Senior Solutions Architect' },
+  ]);
+  if (tie.kept.length === 1 && tie.kept[0].url.endsWith('/first')) {
+    pass('source-rank tie keeps the first-seen URL');
+  } else {
+    fail(`tie-break wrong: kept ${tie.kept.map(o => o.url)}`);
+  }
+
+  // (e) fuzzy tracker dedup — repost of an evaluated company+role is caught
+  const tracker = [
+    { company: 'Databricks', role: 'Specialist Solutions Architect - AI/ML' },
+    { company: 'Cresta', role: 'Senior Forward Deployed Engineer (AI Agent)' },
+  ];
+  if (tc.isFuzzySeenInTracker({ company: 'Databricks', title: 'Sr. Specialist Solutions Architect, AI/ML' }, tracker)) {
+    pass('fuzzy tracker dedup catches a repost with a slightly different title');
+  } else {
+    fail('fuzzy tracker dedup missed an evaluated company+role repost');
+  }
+  if (tc.isFuzzySeenInTracker({ company: 'Databricks', title: 'Forward Deployed Engineer' }, tracker) === null) {
+    pass('fuzzy tracker dedup misses a genuinely new role at a tracked company');
+  } else {
+    fail('fuzzy tracker dedup false-positive on a distinct role');
+  }
+  if (tc.isFuzzySeenInTracker({ company: 'OtherCo', title: 'Specialist Solutions Architect - AI/ML' }, tracker) === null) {
+    pass('fuzzy tracker dedup never matches across companies');
+  } else {
+    fail('fuzzy tracker dedup matched across companies');
+  }
+
+  // (f) scan.mjs wiring: every triage step is guarded on triageRules (upstream compat)
+  const scanSrc = readFile('scan.mjs');
+  if ((scanSrc.match(/if \(triageRules/g) || []).length >= 3 &&
+      scanSrc.includes("'skipped_triage'") &&
+      scanSrc.includes("'skipped_dup_tracker'") &&
+      scanSrc.includes("'skipped_dup_near'")) {
+    pass('scan.mjs guards all triage steps on triageRules and records the three new statuses');
+  } else {
+    fail('scan.mjs triage wiring incomplete (missing guards or scan-history statuses)');
+  }
+
+  // (g) --retriage round-trip on a temp fixture (never touches the real data/pipeline.md)
+  const triageTmp = mkdtempSync(join(tmpdir(), 'co-triage-'));
+  try {
+    mkdirSync(join(triageTmp, 'data'));
+    writeFileSync(join(triageTmp, 'portals.yml'), [
+      'title_filter:',
+      '  positive: ["AI"]',
+      '  seniority_boost: ["Senior"]',
+      'triage:',
+      '  title_boosts:',
+      '    - { pattern: "Forward Deployed", weight: 30 }',
+      '    - { pattern: "Solutions Architect", weight: 20 }',
+      '  discard_titles: ["Product Manager"]',
+      '  url_source_penalty: 5',
+      '  tiers: { p1: 50, p2: 30, p3: 10 }',
+    ].join('\n') + '\n');
+    writeFileSync(join(triageTmp, 'data', 'pipeline.md'), [
+      '# Pipeline — Pending URLs (scanner inbox)',
+      '',
+      '## Pendientes',
+      '',
+      '- [ ] https://www.linkedin.com/jobs/view/999 | Acme | Senior Forward Deployed Engineer',
+      '- [ ] https://jobs.ashbyhq.com/acme/123 | Acme | Forward Deployed Engineer',
+      '- [ ] https://job-boards.greenhouse.io/zen/jobs/1 | Zen | Senior Product Manager, AI',
+      '- [ ] https://jobs.lever.co/foo/abc | Foo | Solutions Architect',
+      '- [!] https://broken.example/x — Error: needs manual paste',
+      '',
+      '## Procesados',
+      '- [x] #001 | https://example.com/old | Old | Role | 3/5 | PDF ❌',
+    ].join('\n') + '\n');
+
+    const out = run(NODE, [join(ROOT, 'scan.mjs'), '--retriage', '--date', '2026-06-10'], {
+      cwd: triageTmp,
+      env: { ...process.env, CAREER_OPS_PORTALS: join(triageTmp, 'portals.yml') },
+    });
+    const after = readFileSync(join(triageTmp, 'data', 'pipeline.md'), 'utf-8');
+
+    if (out !== null && after.includes('<!-- P1:') && after.includes('<!-- P2 -->') &&
+        after.includes('<!-- P3 -->') && after.includes('<!-- LOW:')) {
+      pass('--retriage rewrites Pendientes into the four-tier marker layout');
+    } else {
+      fail('--retriage did not produce the tiered layout');
+    }
+    if (after.includes('- [ ] https://jobs.ashbyhq.com/acme/123 | Acme | Forward Deployed Engineer <!-- score: 30 -->')) {
+      pass('--retriage annotates kept entries with their score after the title field');
+    } else {
+      fail('--retriage kept entry missing or malformed score annotation');
+    }
+    if (after.includes('- [-] https://job-boards.greenhouse.io/zen/jobs/1 | Zen | Senior Product Manager, AI — auto-triage: matched "Product Manager" (retriage 2026-06-10)')) {
+      pass('--retriage moves discard-title matches to Descartados with the matched pattern + date');
+    } else {
+      fail('--retriage discard annotation missing or malformed');
+    }
+    const pendStart = after.indexOf('## Pendientes');
+    const pendEnd = after.indexOf('\n## ', pendStart + 1);
+    const pendSection = after.slice(pendStart, pendEnd === -1 ? after.length : pendEnd);
+    if (after.includes('near-dup of https://jobs.ashbyhq.com/acme/123') &&
+        !pendSection.includes('linkedin.com/jobs/view/999')) {
+      pass('--retriage collapses the LinkedIn near-dup into Descartados, keeping the native ATS URL pending');
+    } else {
+      fail('--retriage near-dup collapse failed');
+    }
+    if (after.includes('- [!] https://broken.example/x — Error: needs manual paste')) {
+      pass('--retriage preserves non-entry lines ([!] error rows)');
+    } else {
+      fail('--retriage dropped a preserved [!] line');
+    }
+    if (after.includes('- [x] #001 | https://example.com/old | Old | Role | 3/5 | PDF ❌')) {
+      pass('--retriage leaves the Procesados section untouched');
+    } else {
+      fail('--retriage corrupted the Procesados section');
+    }
+    // Kept entries still parse with the loadSeenUrls regex (annotation is downstream-safe)
+    const seenUrls = [...after.matchAll(/- \[[ x]\] (https?:\/\/\S+)/g)].map(m => m[1]);
+    if (seenUrls.includes('https://jobs.ashbyhq.com/acme/123') && seenUrls.includes('https://jobs.lever.co/foo/abc')) {
+      pass('score-annotated entries still parse with the loadSeenUrls checkbox regex');
+    } else {
+      fail(`loadSeenUrls regex broken by annotations: ${JSON.stringify(seenUrls)}`);
+    }
+  } finally {
+    rmSync(triageTmp, { recursive: true, force: true });
+  }
+} catch (e) {
+  fail(`scan-time triage tests crashed: ${e.message}`);
 }
 
 // ── SUMMARY ─────────────────────────────────────────────────────

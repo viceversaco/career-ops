@@ -68,6 +68,7 @@ AI-powered job search automation built on Claude Code: pipeline tracking, offer 
 | `followup-cadence.mjs` | Follow-up cadence calculator (JSON output) |
 | `data/follow-ups.md` | Follow-up history tracker |
 | `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly, zero LLM cost |
+| `triage-core.mjs` | Scan-time triage (fork): P1/P2/P3/LOW ranking + discard/near-dup/fuzzy-tracker dedupe via optional `triage:` block in portals.yml; re-rank inbox with `node scan.mjs --retriage` (see modes/scan.md "Triage (v-fork)") |
 | `check-liveness.mjs` | Job posting liveness checker |
 | `liveness-core.mjs` | Shared liveness logic (expired signals win over generic Apply text) |
 | `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy), plus `## Machine Summary` YAML for downstream scripts. Header includes `**Legitimacy:** {tier}`. |

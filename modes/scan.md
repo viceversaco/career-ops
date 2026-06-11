@@ -360,3 +360,34 @@ Fallback: si solo tienes la URL ATS directa, navega primero al sitio web de la e
 - Ajustar keywords de filtrado según evolucionen los roles target
 - Añadir empresas a `tracked_companies` cuando interese seguirlas de cerca
 - Verificar `careers_url` periódicamente — las empresas cambian de plataforma ATS
+
+## Triage (v-fork)
+
+Fork enhancement: scan-time ranking + first-pass dedupe, driven by an **optional `triage:` block in `portals.yml`** (see `templates/portals.example.yml` for the documented schema). If the block is absent, the scanner behaves exactly as stock upstream — every triage step is skipped.
+
+When enabled, `node scan.mjs` adds these steps after the title/location filters (logic lives in `triage-core.mjs`, pure + unit-tested; fuzzy role matching reuses `role-match.mjs`):
+
+1. **Discard** — titles matching `discard_titles` (e.g. "Product Manager", "Engineering Manager") never enter the pipeline. Scan-history status: `skipped_triage`.
+2. **Fuzzy tracker dedup** — normalized company + fuzzy role match against `data/applications.md`, so a LinkedIn repost of an already-evaluated company+role is caught even when the URL and exact title differ. Status: `skipped_dup_tracker`.
+3. **Within-batch near-dup collapse** — same company + fuzzy-same role under several URLs keeps only the best source: native ATS (Greenhouse/Ashby/Lever/Workday/company domain) beats LinkedIn/aggregators; ties keep the first seen. Status: `skipped_dup_near`.
+4. **Rank** — survivors get a score: sum of matching `title_boosts` weights (+/-), `company_boosts` (negatives demote agencies), a small seniority nudge (reuses `title_filter.seniority_boost`), minus `url_source_penalty` for aggregator URLs. Tiers (configurable via `tiers:`, defaults `{p1: 50, p2: 30, p3: 10}`): score ≥ p1 → **P1**, ≥ p2 → **P2**, ≥ p3 → **P3**, else **LOW**.
+
+**Tiered inbox layout** — inside `## Pendientes`, entries are grouped under four HTML-comment markers (created on first use; flat append still works if they're missing):
+
+```
+<!-- P1: top archetype matches — evaluate first -->
+- [ ] url | company | title <!-- score: 62 -->
+<!-- P2 -->
+<!-- P3 -->
+<!-- LOW: agencies / weak matches -->
+```
+
+Lines stay plain `- [ ] url | company | title` checkboxes (the score annotation comes AFTER the third field), so `loadSeenUrls`, the pipeline-mode scout, and every other consumer keep parsing them unchanged.
+
+**Re-rank the existing inbox** (no scanning) after tuning the rules:
+
+```bash
+node scan.mjs --retriage [--date YYYY-MM-DD] [--dry-run]
+```
+
+This rebuilds `## Pendientes` into the tiered layout, moves `discard_titles` matches and near-dups to `## Descartados` annotated as `— auto-triage: matched "<pattern>" (retriage <date>)` / `— auto-triage: near-dup of <url> (retriage <date>)`, preserves `- [!]` error rows, and prints a tier summary table.

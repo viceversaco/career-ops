@@ -28,6 +28,15 @@
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
  *   node scan.mjs --verify --throttle          # jittered ~5-10s gap between checks (stay under rate limits)
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
+ *   node scan.mjs --retriage       # no scanning: re-rank existing "## Pendientes" entries into P1/P2/P3/LOW tiers
+ *   node scan.mjs --retriage --date 2026-06-10 # date used in auto-triage annotations (default: today)
+ *   node scan.mjs --help           # show usage
+ *
+ * Triage (optional, fork enhancement): when portals.yml has a `triage:` block,
+ * new offers are discarded by title (skipped_triage), deduped fuzzily against
+ * the tracker (skipped_dup_tracker), collapsed within the batch
+ * (skipped_dup_near), and ranked into tiers inside "## Pendientes". Without
+ * the block the scanner behaves exactly as stock upstream. See triage-core.mjs.
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
@@ -36,6 +45,10 @@ import path from 'path';
 import yaml from 'js-yaml';
 
 import { makeHttpCtx } from './providers/_http.mjs';
+import {
+  loadTriageConfig, rankOffer, shouldDiscard, findNearDups, isFuzzySeenInTracker,
+  insertOffersIntoPendingLines, buildTieredPendingSection, parsePendingLine,
+} from './triage-core.mjs';
 
 const parseYaml = yaml.load;
 
@@ -225,6 +238,24 @@ function loadSeenCompanyRoles() {
   return seen;
 }
 
+// loadTrackerEntries — like loadSeenCompanyRoles but keeps the raw strings so
+// triage-core's fuzzy matcher (normalizeCompany + roleFuzzyMatch) can compare
+// against them. Only loaded when a `triage:` block is configured.
+function loadTrackerEntries() {
+  const entries = [];
+  if (existsSync(APPLICATIONS_PATH)) {
+    const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
+    for (const match of text.matchAll(/\|[^|]+\|[^|]+\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|/g)) {
+      const company = match[1].trim();
+      const role = match[2].trim();
+      if (company && role && company.toLowerCase() !== 'company') {
+        entries.push({ company, role });
+      }
+    }
+  }
+  return entries;
+}
+
 // ── Pipeline writer ─────────────────────────────────────────────────
 
 function appendToPipeline(offers) {
@@ -256,6 +287,37 @@ function appendToPipeline(offers) {
   }
 
   writeFileSync(PIPELINE_PATH, text, 'utf-8');
+}
+
+// Tier-aware variant: offers carry `_triage: {score, tier}` (set by rankOffer).
+// Inserts each offer under its tier marker inside "## Pendientes", sorted by
+// score desc within the tier, annotated as `<!-- score: N -->` AFTER the third
+// `|` field (so the pipeline-mode scout that splits on `|` and the
+// loadSeenUrls regex both keep working). Markers are created on first use.
+// Falls back to the flat writer when the section can't be located.
+function appendToPipelineTiered(offers) {
+  if (offers.length === 0) return;
+
+  let text = existsSync(PIPELINE_PATH) ? readFileSync(PIPELINE_PATH, 'utf-8') : '';
+  const marker = '## Pendientes';
+  let idx = text.indexOf(marker);
+  if (idx === -1) {
+    // Create the section (same placement rule as the flat writer), then insert.
+    const procIdx = text.indexOf('\n## Procesad');
+    const insertAt = procIdx === -1 ? text.length : procIdx + 1;
+    text = text.slice(0, insertAt) + `${marker}\n\n` + text.slice(insertAt);
+    idx = text.indexOf(marker);
+  }
+
+  const headingLineEnd = text.indexOf('\n', idx);
+  const sectionStart = headingLineEnd === -1 ? text.length : headingLineEnd + 1;
+  const nextSection = text.indexOf('\n## ', sectionStart);
+  const sectionEnd = nextSection === -1 ? text.length : nextSection;
+
+  const lines = text.slice(sectionStart, sectionEnd).split('\n');
+  const updated = insertOffersIntoPendingLines(lines, offers).join('\n');
+
+  writeFileSync(PIPELINE_PATH, text.slice(0, sectionStart) + updated + text.slice(sectionEnd), 'utf-8');
 }
 
 function appendToScanHistory(offers, date, status = 'added') {
@@ -392,8 +454,157 @@ function guardStatusFor(code) {
   return 'skipped_invalid_url';
 }
 
+const HELP_TEXT = `scan.mjs — zero-token portal scanner
+
+Usage:
+  node scan.mjs                    Scan all enabled companies
+  node scan.mjs --dry-run          Preview without writing files
+  node scan.mjs --company <name>   Scan a single company
+  node scan.mjs --verify           Playwright-check each new URL; drop expired postings
+  node scan.mjs --verify --headed-fallback   Retry anti-bot-blocked URLs in a headed browser
+  node scan.mjs --verify --throttle[=ms]     Jittered gap between liveness checks
+  node scan.mjs --retriage         No scanning: re-rank existing "## Pendientes" entries
+                                   into P1/P2/P3/LOW tiers using the triage: rules in
+                                   portals.yml. Discard-title matches and within-batch
+                                   near-dups move to "## Descartados" with an
+                                   auto-triage annotation. Supports --dry-run.
+  node scan.mjs --retriage --date YYYY-MM-DD  Date for retriage annotations (default: today)
+  node scan.mjs --help             Show this help
+
+Triage (optional): add a \`triage:\` block to portals.yml to enable scan-time
+ranking + first-pass dedupe (see templates/portals.example.yml for the schema).
+Without the block, the scanner behaves exactly as stock upstream.`;
+
+// ── Retriage (--retriage) ───────────────────────────────────────────
+// Re-rank the existing "## Pendientes" inbox with the current triage rules:
+// rebuild the section into the tiered layout, move discard_titles matches and
+// within-batch near-dups to "## Descartados". No scanning, no providers.
+
+function resolveDateArg(args) {
+  const flag = args.indexOf('--date');
+  if (flag !== -1 && /^\d{4}-\d{2}-\d{2}$/.test(args[flag + 1] || '')) return args[flag + 1];
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Insert `- [-]` lines right under the "## Descartados" heading (created
+// before "## Procesados" if absent).
+function addToDescartados(text, lines, date) {
+  if (lines.length === 0) return text;
+  let idx = text.indexOf('## Descartados');
+  if (idx === -1) {
+    const procIdx = text.indexOf('\n## Procesad');
+    const heading = `## Descartados (auto-triage ${date})\n`;
+    if (procIdx === -1) {
+      text = text.replace(/\n*$/, '\n\n') + heading;
+    } else {
+      text = text.slice(0, procIdx + 1) + heading + '\n' + text.slice(procIdx + 1);
+    }
+    idx = text.indexOf('## Descartados');
+  }
+  const headingLineEnd = text.indexOf('\n', idx);
+  const insertAt = headingLineEnd === -1 ? text.length : headingLineEnd + 1;
+  return text.slice(0, insertAt) + lines.join('\n') + '\n' + text.slice(insertAt);
+}
+
+function runRetriage(args) {
+  const dryRun = args.includes('--dry-run');
+  const date = resolveDateArg(args);
+
+  if (!existsSync(PORTALS_PATH)) {
+    console.error('Error: portals.yml not found. Run onboarding first.');
+    process.exit(1);
+  }
+  const config = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
+  const rules = loadTriageConfig(config);
+  if (!rules) {
+    console.error('Error: no `triage:` block in portals.yml — nothing to retriage.');
+    console.error('See templates/portals.example.yml for the schema.');
+    process.exit(1);
+  }
+  if (!existsSync(PIPELINE_PATH)) {
+    console.error(`Error: ${PIPELINE_PATH} not found.`);
+    process.exit(1);
+  }
+
+  const text = readFileSync(PIPELINE_PATH, 'utf-8');
+  const marker = '## Pendientes';
+  const idx = text.indexOf(marker);
+  if (idx === -1) {
+    console.error('Error: no "## Pendientes" section in pipeline.md.');
+    process.exit(1);
+  }
+  const headingLineEnd = text.indexOf('\n', idx);
+  const sectionStart = headingLineEnd === -1 ? text.length : headingLineEnd + 1;
+  const nextSection = text.indexOf('\n## ', sectionStart);
+  const sectionEnd = nextSection === -1 ? text.length : nextSection;
+
+  // Parse entries; preserve any non-entry lines ([!] errors, stray notes).
+  // Old tier markers and blank lines are dropped — the section is rebuilt.
+  const entries = [];
+  const preserved = [];
+  for (const line of text.slice(sectionStart, sectionEnd).split('\n')) {
+    const entry = parsePendingLine(line);
+    if (entry) { entries.push(entry); continue; }
+    const t = line.trim();
+    if (t === '' || /^<!--\s*(P1|P2|P3|LOW)\b/.test(t)) continue;
+    preserved.push(line);
+  }
+
+  // 1. discard_titles
+  const discarded = [];
+  const survivors = [];
+  for (const entry of entries) {
+    const pattern = shouldDiscard(entry, rules);
+    if (pattern) discarded.push({ ...entry, pattern });
+    else survivors.push(entry);
+  }
+
+  // 2. within-batch near-dup collapse
+  const { kept, dropped } = findNearDups(survivors);
+
+  // 3. rank
+  for (const offer of kept) offer._triage = rankOffer(offer, rules);
+
+  // 4. rebuild Pendientes + move losers to Descartados
+  const newSection = buildTieredPendingSection(kept, preserved).join('\n');
+  let updated = text.slice(0, sectionStart) + newSection + text.slice(sectionEnd);
+  updated = addToDescartados(updated, [
+    ...discarded.map(d => `- [-] ${d.url} | ${d.company} | ${d.title} — auto-triage: matched "${d.pattern}" (retriage ${date})`),
+    ...dropped.map(d => `- [-] ${d.url} | ${d.company} | ${d.title} — auto-triage: near-dup of ${d.dupOf} (retriage ${date})`),
+  ], date);
+
+  if (!dryRun) writeFileSync(PIPELINE_PATH, updated, 'utf-8');
+
+  // 5. summary
+  console.log(`\n${'━'.repeat(45)}`);
+  console.log(`Retriage — ${date}${dryRun ? ' (dry run)' : ''}`);
+  console.log(`${'━'.repeat(45)}`);
+  const ranked = kept.slice().sort((a, b) => b._triage.score - a._triage.score);
+  console.log('| Tier | Score | Company | Title |');
+  console.log('|------|-------|---------|-------|');
+  for (const o of ranked) {
+    console.log(`| ${o._triage.tier} | ${o._triage.score} | ${o.company} | ${o.title} |`);
+  }
+  const counts = { P1: 0, P2: 0, P3: 0, LOW: 0 };
+  for (const o of kept) counts[o._triage.tier]++;
+  console.log(`\nTiers: P1 ${counts.P1} · P2 ${counts.P2} · P3 ${counts.P3} · LOW ${counts.LOW}`);
+  console.log(`Discarded (discard_titles): ${discarded.length}`);
+  console.log(`Near-dups collapsed:        ${dropped.length}`);
+  if (preserved.length > 0) console.log(`Preserved non-entry lines:  ${preserved.length}`);
+  if (dryRun) console.log('\n(dry run — run without --dry-run to save results)');
+  else console.log(`\nRewrote ${PIPELINE_PATH}`);
+}
+
 async function main() {
   const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(HELP_TEXT);
+    return;
+  }
+  if (args.includes('--retriage')) {
+    runRetriage(args);
+    return;
+  }
   const dryRun = args.includes('--dry-run');
   const verify = args.includes('--verify');
   // Opt-in: on an anti-bot challenge (e.g. pracuj.pl Cloudflare wall), retry the
@@ -425,6 +636,10 @@ async function main() {
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
   const locationFilter = buildLocationFilter(config.location_filter);
+  // Optional triage rules (fork enhancement). null → every triage step below
+  // is skipped and the scanner behaves exactly as stock upstream.
+  const triageRules = loadTriageConfig(config);
+  const trackerEntries = triageRules ? loadTrackerEntries() : [];
 
   // 3. Resolve a provider for each enabled company
   const targets = [];
@@ -469,6 +684,10 @@ async function main() {
   let totalFilteredTitle = 0;
   let totalFilteredLocation = 0;
   let totalDupes = 0;
+  let totalTriageDiscards = 0;
+  let totalTrackerFuzzyDups = 0;
+  const triageDiscards = [];   // → scan-history status skipped_triage
+  const trackerFuzzyDups = []; // → scan-history status skipped_dup_tracker
   const newOffers = [];
   const errors = [...resolveErrors];
 
@@ -506,6 +725,20 @@ async function main() {
           totalFilteredLocation++;
           continue;
         }
+        // Triage: discard_titles — never enters the pipeline. Recorded in
+        // scan-history only the first time the URL is seen (re-scans of an
+        // already-recorded URL would otherwise bloat the TSV every run).
+        if (triageRules) {
+          const discardPattern = shouldDiscard(job, triageRules);
+          if (discardPattern) {
+            totalTriageDiscards++;
+            if (!seenUrls.has(job.url)) {
+              seenUrls.add(job.url);
+              triageDiscards.push({ ...job, source: sourceName });
+            }
+            continue;
+          }
+        }
         if (seenUrls.has(job.url)) {
           totalDupes++;
           continue;
@@ -513,6 +746,16 @@ async function main() {
         const key = `${job.company.toLowerCase()}::${job.title.toLowerCase()}`;
         if (seenCompanyRoles.has(key)) {
           totalDupes++;
+          continue;
+        }
+        // Triage: fuzzy tracker dedup — a repost of an already-evaluated
+        // company+role (different URL, slightly different title) is caught
+        // here so it never re-enters the pipeline.
+        if (triageRules && isFuzzySeenInTracker(job, trackerEntries)) {
+          totalTrackerFuzzyDups++;
+          seenUrls.add(job.url);
+          seenCompanyRoles.add(key);
+          trackerFuzzyDups.push({ ...job, source: sourceName });
           continue;
         }
         // Mark as seen to avoid intra-scan dupes
@@ -527,24 +770,53 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
 
+  // 5.4. Triage: within-batch near-dup collapse — same company + fuzzy-same
+  // role under several URLs keeps only the best source (native ATS preferred
+  // over LinkedIn/aggregators; tie → first seen). Done BEFORE --verify so
+  // dropped near-dups never burn a liveness check.
+  let candidateOffers = newOffers;
+  let nearDupOffers = []; // → scan-history status skipped_dup_near
+  if (triageRules && newOffers.length > 1) {
+    const { kept, dropped } = findNearDups(newOffers);
+    candidateOffers = kept;
+    nearDupOffers = dropped;
+  }
+
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
-  let verifiedOffers = newOffers;
+  let verifiedOffers = candidateOffers;
   let expiredOffers = [];
   let droppedOffers = [];
   let invalidOffers = [];
-  if (verify && newOffers.length > 0) {
-    console.log(`\nVerifying liveness of ${newOffers.length} new offer(s) with Playwright (sequential)...`);
-    const result = await verifyOffers(newOffers, { headedFallback, throttleBaseMs });
+  if (verify && candidateOffers.length > 0) {
+    console.log(`\nVerifying liveness of ${candidateOffers.length} new offer(s) with Playwright (sequential)...`);
+    const result = await verifyOffers(candidateOffers, { headedFallback, throttleBaseMs });
     verifiedOffers = result.verified;
     expiredOffers = result.expired;
     droppedOffers = result.dropped;
     invalidOffers = result.invalid;
   }
 
+  // 5.6. Triage: rank survivors into tiers (annotation drives the tiered writer).
+  if (triageRules) {
+    for (const offer of verifiedOffers) {
+      offer._triage = rankOffer(offer, triageRules);
+    }
+  }
+
   // 6. Write results
   if (!dryRun && verifiedOffers.length > 0) {
-    appendToPipeline(verifiedOffers);
+    if (triageRules) appendToPipelineTiered(verifiedOffers);
+    else appendToPipeline(verifiedOffers);
     appendToScanHistory(verifiedOffers, date);
+  }
+  if (!dryRun && triageDiscards.length > 0) {
+    appendToScanHistory(triageDiscards, date, 'skipped_triage');
+  }
+  if (!dryRun && trackerFuzzyDups.length > 0) {
+    appendToScanHistory(trackerFuzzyDups, date, 'skipped_dup_tracker');
+  }
+  if (!dryRun && nearDupOffers.length > 0) {
+    appendToScanHistory(nearDupOffers, date, 'skipped_dup_near');
   }
   if (!dryRun && expiredOffers.length > 0) {
     appendToScanHistory(expiredOffers, date, 'skipped_expired');
@@ -579,12 +851,22 @@ async function main() {
   console.log(`Filtered by title:     ${totalFilteredTitle} removed`);
   console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
+  if (triageRules) {
+    console.log(`Triage discards:       ${totalTriageDiscards} removed (${triageDiscards.length} newly recorded)`);
+    console.log(`Tracker fuzzy dups:    ${totalTrackerFuzzyDups} skipped`);
+    console.log(`Near-dups collapsed:   ${nearDupOffers.length} skipped`);
+  }
   if (verify) {
     console.log(`Expired (verified):    ${expiredOffers.length} dropped`);
     console.log(`No apply control:      ${droppedOffers.length} dropped`);
     console.log(`Invalid (guarded):     ${invalidOffers.length} dropped`);
   }
   console.log(`New offers added:      ${verifiedOffers.length}`);
+  if (triageRules && verifiedOffers.length > 0) {
+    const tierCounts = { P1: 0, P2: 0, P3: 0, LOW: 0 };
+    for (const o of verifiedOffers) tierCounts[o._triage?.tier || 'LOW']++;
+    console.log(`Tier ranking:          P1 ${tierCounts.P1} · P2 ${tierCounts.P2} · P3 ${tierCounts.P3} · LOW ${tierCounts.LOW}`);
+  }
 
   if (agentHandoff.length > 0) {
     console.log(`Agent/WebSearch handoff: ${agentHandoff.length} compan${agentHandoff.length === 1 ? 'y' : 'ies'} not handled by zero-token providers`);
@@ -607,7 +889,8 @@ async function main() {
   if (verifiedOffers.length > 0) {
     console.log('\nNew offers:');
     for (const o of verifiedOffers) {
-      console.log(`  + ${o.company} | ${o.title} | ${o.location || 'N/A'}`);
+      const tierTag = o._triage ? ` [${o._triage.tier} ${o._triage.score}]` : '';
+      console.log(`  +${tierTag} ${o.company} | ${o.title} | ${o.location || 'N/A'}`);
     }
     if (dryRun) {
       console.log('\n(dry run — run without --dry-run to save results)');

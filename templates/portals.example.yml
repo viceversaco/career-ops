@@ -143,6 +143,55 @@ title_filter:
     - "Head"
     - "Director"
 
+# -- Scan-time triage (optional: ranking + first-pass dedupe) --
+# If this entire block is absent, the scanner behaves exactly as before
+# (flat append to "## Pendientes", exact-URL/company+title dedup only).
+#
+# With a `triage:` block, `node scan.mjs` additionally:
+#   1. DISCARDS titles matching `discard_titles` before they enter the inbox
+#      (recorded in scan-history with status `skipped_triage`)
+#   2. Fuzzy-dedupes against data/applications.md — a repost of an already
+#      evaluated company+role is skipped even when the URL and exact title
+#      differ (status `skipped_dup_tracker`)
+#   3. Collapses within-batch near-dups (same company + fuzzy-same role under
+#      several URLs), keeping the best source: native ATS (greenhouse/ashby/
+#      lever/workday/company domain) over LinkedIn/aggregators; ties keep the
+#      first seen (status `skipped_dup_near`)
+#   4. RANKS survivors into tiers inside "## Pendientes" under HTML-comment
+#      markers (P1/P2/P3/LOW), sorted by score desc, each line annotated with
+#      `<!-- score: N -->` after the title field
+#
+# Scoring: sum of matching `title_boosts` weights (word-boundary match for
+# simple patterns, substring otherwise; weights may be negative)
+# + `company_boosts` for the offer's company (use negatives for agencies)
+# + a small seniority nudge when the title matches `title_filter.seniority_boost`
+#   (weight configurable via `seniority_boost_weight`, default 5)
+# - `url_source_penalty` when the URL is a LinkedIn/aggregator link.
+# Tiers: score >= p1 → P1, >= p2 → P2, >= p3 → P3, else LOW.
+#
+# Re-rank the existing inbox after changing rules (no scanning):
+#   node scan.mjs --retriage [--date YYYY-MM-DD] [--dry-run]
+# Discard-title matches and near-dups in the pending list move to
+# "## Descartados" with an `auto-triage: ...` annotation.
+
+# triage:
+#   title_boosts:
+#     # [CUSTOMIZE] patterns that signal YOUR target archetypes
+#     - { pattern: "Forward Deployed", weight: 30 }
+#     - { pattern: "Solutions Architect", weight: 20 }
+#     - { pattern: "Applied AI", weight: 12 }
+#     - { pattern: "Pre-Sales", weight: -10 }
+#   company_boosts:
+#     SomeAgency: -25       # demote recruiting-agency listings
+#     DreamCo: 15           # promote companies you're chasing
+#   discard_titles:
+#     # Hard no-go titles — never enter the pipeline
+#     - "Product Manager"
+#     - "Engineering Manager"
+#   seniority_boost_weight: 5   # added when title_filter.seniority_boost matches
+#   url_source_penalty: 5       # subtracted for linkedin / aggregator URLs
+#   tiers: { p1: 50, p2: 30, p3: 10 }
+
 # -- Search queries --
 # Each query triggers a WebSearch. Use site: to filter by portal.
 # The scanner extracts title, URL, and company from results.
