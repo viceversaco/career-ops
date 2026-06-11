@@ -1,6 +1,31 @@
 # Mode: pipeline — URL Inbox (Second Brain)
 
-Process job URLs stored in `data/pipeline.md`. The user adds URLs at any time and then executes `/career-ops pipeline` to process them all.
+Process job URLs stored in `data/pipeline.md`. The user adds URLs at any time and then executes `/career-ops pipeline` to process them.
+
+## Step 0 — Scope confirmation (MANDATORY, before selecting a path)
+
+**Never launch workers or a workflow on the full inbox without the user choosing the scope
+first.** Evaluations cost real tokens; the inbox routinely holds dozens of triaged-but-deferred
+entries. The original failure mode of this step: a fresh session read 24 pending URLs and
+immediately fan-out-launched all of them.
+
+1. Read the pending entries. If the inbox is **tiered** (`<!-- P1 -->` / `<!-- P2 -->` /
+   `<!-- P3 -->` / `<!-- LOW -->` markers from scan-time triage — see `modes/scan.md`
+   "Triage (v-fork)"), count per tier and note the top few companies in each. If untiered,
+   just count.
+2. **Ask the user what to run** before doing anything else. On Claude Code use the
+   `AskUserQuestion` tool; on other CLIs ask in plain text and wait. Offer concrete options
+   built from the actual inbox, e.g.:
+   - "P1 + P2 only (N offers)" — recommended default when tiers exist
+   - "Top N by score" (let them name N)
+   - "A specific tier or specific companies"
+   - "Everything pending (N offers)"
+3. **Skip the question only when scope is already explicit** — the invocation names a tier,
+   a count, or specific companies/URLs (e.g. `/career-ops pipeline P2`, "run the top 5",
+   "process the LiveKit and Rime ones"), or the user pasted the URLs to process in this
+   conversation. "Process the inbox" / bare `/career-ops pipeline` is NOT explicit scope.
+4. Proceed to path selection with **only the selected subset** as the pending set. Entries
+   outside the selection stay untouched in Pending.
 
 ## Execution paths
 

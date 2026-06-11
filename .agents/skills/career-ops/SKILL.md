@@ -98,7 +98,10 @@ Agent(
 
 **Claude Code — pipeline fan-out (preferred):** When running `/career-ops pipeline` under
 Claude Code with **3 or more** pending URLs, prefer the `Workflow` tool over per-URL `Agent`
-subagents. Scout the inbox first (collect `- [ ]` URLs from `data/pipeline.md`, compute
+subagents. **FIRST complete Step 0 — Scope confirmation from `modes/pipeline.md`** (ask the
+user via `AskUserQuestion` which tier/count/companies to run — never fan out on the full inbox
+just because it has 3+ entries; bare `/career-ops pipeline` is not explicit scope). Then scout
+the selected subset (collect its `- [ ]` URLs from `data/pipeline.md`, compute
 `baseNum` = highest `reports/` prefix + 1, derive a stable `id` per URL), then call:
 
 ```
